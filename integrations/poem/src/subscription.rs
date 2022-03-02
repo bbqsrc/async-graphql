@@ -67,23 +67,50 @@ impl<'a> FromRequest<'a> for GraphQLProtocol {
 /// let schema = Schema::new(Query, EmptyMutation, Subscription);
 /// let app = Route::new().at("/ws", get(GraphQLSubscription::new(schema)));
 /// ```
-pub struct GraphQLSubscription<Query, Mutation, Subscription> {
+pub struct GraphQLSubscription<Query, Mutation, Subscription, OnConnInit> {
     schema: Schema<Query, Mutation, Subscription>,
+    on_connection_init: OnConnInit,
 }
 
-impl<Query, Mutation, Subscription> GraphQLSubscription<Query, Mutation, Subscription> {
+impl<Query, Mutation, Subscription>
+    GraphQLSubscription<Query, Mutation, Subscription, DefaultOnConnInitType>
+{
     /// Create a GraphQL subscription endpoint.
     pub fn new(schema: Schema<Query, Mutation, Subscription>) -> Self {
-        Self { schema }
+        Self {
+            schema,
+            on_connection_init: default_on_connection_init,
+        }
+    }
+}
+
+impl<Query, Mutation, Subscription, OnConnInit, OnConnInitFut>
+    GraphQLSubscription<Query, Mutation, Subscription, OnConnInit>
+where
+    OnConnInit: Fn(serde_json::Value) -> OnConnInitFut + Send + Sync + Clone + 'static,
+    OnConnInitFut: Future<Output = async_graphql::Result<Data>> + Send + 'static,
+{
+    /// Create a GraphQL subscription endpoint.
+    pub fn new_with_init(
+        schema: Schema<Query, Mutation, Subscription>,
+        on_connection_init: OnConnInit,
+    ) -> Self {
+        Self {
+            schema,
+            on_connection_init,
+        }
     }
 }
 
 #[poem::async_trait]
-impl<Query, Mutation, Subscription> Endpoint for GraphQLSubscription<Query, Mutation, Subscription>
+impl<Query, Mutation, Subscription, OnConnInit, OnConnInitFut> Endpoint
+    for GraphQLSubscription<Query, Mutation, Subscription, OnConnInit>
 where
     Query: ObjectType + 'static,
     Mutation: ObjectType + 'static,
     Subscription: SubscriptionType + 'static,
+    OnConnInit: Fn(serde_json::Value) -> OnConnInitFut + Send + Sync + Clone + 'static,
+    OnConnInitFut: Future<Output = async_graphql::Result<Data>> + Send + 'static,
 {
     type Output = Response;
 
@@ -93,9 +120,15 @@ where
         let protocol = GraphQLProtocol::from_request(&req, &mut body).await?;
         let schema = self.schema.clone();
 
+        let on_connection_init = self.on_connection_init.clone();
+
         let resp = websocket
             .protocols(ALL_WEBSOCKET_PROTOCOLS)
-            .on_upgrade(move |stream| GraphQLWebSocket::new(stream, schema, protocol).serve())
+            .on_upgrade(move |stream| {
+                GraphQLWebSocket::new(stream, schema, protocol)
+                    .on_connection_init(on_connection_init)
+                    .serve()
+            })
             .into_response();
         Ok(resp)
     }
